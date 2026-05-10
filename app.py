@@ -1,3 +1,4 @@
+```python
 import os
 import re
 import time
@@ -10,8 +11,15 @@ app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0"))
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+
+# 支持多个中文发送者账号
+OWNER_TELEGRAM_IDS = {
+    int(x.strip())
+    for x in os.getenv("OWNER_TELEGRAM_IDS", "").split(",")
+    if x.strip().isdigit()
+}
+
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -39,11 +47,9 @@ def has_chinese(text):
 def has_vietnamese(text):
     text_lower = text.lower()
 
-    # 有越南语特殊字母，基本可以判断是越南语
     if re.search(f"[{VIETNAMESE_CHARS}]", text_lower):
         return True
 
-    # 没有声调时，用常见越南语词辅助判断
     common_vi_words = [
         "toi", "em", "anh", "chi", "ban", "hom nay", "ngay mai",
         "khong", "duoc", "lam", "di", "den", "muon", "som",
@@ -59,16 +65,21 @@ def has_link(text):
 
 def is_too_short(text):
     clean = text.strip().lower()
+
     if len(clean) <= 1:
         return True
+
     if clean in SHORT_WORDS:
         return True
+
     return False
 
 
 def is_pure_symbol_or_emoji(text):
-    # 没有中文、越南语、英文字母、数字，基本就是表情/符号
-    return re.search(r"[\u4e00-\u9fffA-Za-z0-9" + VIETNAMESE_CHARS + "]", text.lower()) is None
+    return re.search(
+        r"[\u4e00-\u9fffA-Za-z0-9" + VIETNAMESE_CHARS + "]",
+        text.lower()
+    ) is None
 
 
 def should_skip_message(message):
@@ -99,17 +110,36 @@ def should_skip_message(message):
 
 
 def translate_with_openai(text, direction):
+
     if direction == "zh_to_vi":
+
         system_prompt = """
 你是一个中越团队专用翻译助手。
-把中文翻译成自然、口语化、越南员工容易理解的越南语。
-只输出越南语，不要解释，不要加引号。
+
+请把中文翻译成：
+自然、口语化、越南员工容易理解的越南语。
+
+要求：
+- 保持简洁
+- 不要解释
+- 不要加引号
+- 不要加“翻译如下”
+- 不要太正式
 """
+
     else:
+
         system_prompt = """
 你是一个中越团队专用翻译助手。
-把越南语翻译成自然、准确、老板容易理解的中文。
-只输出中文，不要解释，不要加引号。
+
+请把越南语翻译成：
+自然、准确、老板容易理解的中文。
+
+要求：
+- 保持简洁
+- 不要解释
+- 不要加引号
+- 不要加“翻译如下”
 """
 
     response = client.responses.create(
@@ -129,7 +159,15 @@ def translate_with_openai(text, direction):
     return response.output_text.strip()
 
 
-def send_reply(chat_id, reply_to_message_id, user_id, user_name, translated_text, direction):
+def send_reply(
+    chat_id,
+    reply_to_message_id,
+    user_id,
+    user_name,
+    translated_text,
+    direction
+):
+
     safe_name = html.escape(user_name or "用户")
     safe_text = html.escape(translated_text)
 
@@ -162,9 +200,11 @@ def home():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+
     data = request.get_json(silent=True) or {}
 
     message = data.get("message")
+
     if not message:
         return "ok"
 
@@ -174,26 +214,33 @@ def webhook():
     chat_id = chat.get("id")
     message_id = message.get("message_id")
     user_id = from_user.get("id")
-    user_name = from_user.get("first_name") or from_user.get("username") or "用户"
+
+    user_name = (
+        from_user.get("first_name")
+        or from_user.get("username")
+        or "用户"
+    )
+
     text = message.get("text", "").strip()
 
     unique_key = f"{chat_id}:{message_id}"
 
-    # 防重复翻译
+    # 防重复
     if unique_key in processed_messages:
         return "ok"
 
     processed_messages.add(unique_key)
 
-    # 防止内存无限变大
+    # 防止内存过大
     if len(processed_messages) > 5000:
         processed_messages.clear()
 
     if should_skip_message(message):
         return "ok"
 
-    # 防刷屏：同一个人 3 秒内只翻译一次
+    # 防刷屏
     now = time.time()
+
     last_time = last_user_time.get(user_id, 0)
 
     if now - last_time < COOLDOWN_SECONDS:
@@ -203,21 +250,23 @@ def webhook():
 
     direction = None
 
-    # 你发中文 → 越南语
-    if user_id == OWNER_TELEGRAM_ID and has_chinese(text):
+    # 指定账号发中文 → 越南语
+    if user_id in OWNER_TELEGRAM_IDS and has_chinese(text):
         direction = "zh_to_vi"
 
-    # 别人发越南语 → 中文
-    elif user_id != OWNER_TELEGRAM_ID and has_vietnamese(text):
+    # 其他人发越南语 → 中文
+    elif user_id not in OWNER_TELEGRAM_IDS and has_vietnamese(text):
         direction = "vi_to_zh"
 
     else:
         return "ok"
 
     try:
+
         translated_text = translate_with_openai(text, direction)
 
         if translated_text:
+
             send_reply(
                 chat_id=chat_id,
                 reply_to_message_id=message_id,
@@ -234,5 +283,11 @@ def webhook():
 
 
 if __name__ == "__main__":
+
     port = int(os.getenv("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port)
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
+```
